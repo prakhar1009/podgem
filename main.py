@@ -2,6 +2,13 @@ import streamlit as st
 from services.elevenlabs import *
 from services.gemini import *
 import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Check for API keys
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
 def generate_podcast(prompt: str, system_message: str, pdf_path: str = "") -> dict:
     if pdf_path and not os.path.isfile(pdf_path):
@@ -45,31 +52,73 @@ fix_prompt = "Transform the provided pdf into a natural, engaging podcast dialog
 
 user_prompt = st.text_area("Enter your podcast prompt", value=fix_prompt)
 
+# Check API keys before generation
 if st.button("Generate Podcast"):
-    if pdf_file is not None:
+    # Check if API key is available
+    if not ELEVENLABS_API_KEY:
+        st.error("⚠️ ElevenLabs API key is missing. Please add your API key to the .env file.")
+        st.info("To fix this issue: Create a .env file in the project root with ELEVENLABS_API_KEY=your_api_key_here")
+    elif pdf_file is not None:
         try:
+            # Show progress
+            progress_placeholder = st.empty()
+            progress_placeholder.info("Processing PDF file...")
+            
+            # Save uploaded PDF
             pdf_path = f"temp_uploaded_file.pdf"
             with open(pdf_path, "wb") as f:
                 f.write(pdf_file.getbuffer())
             
-            results = generate_podcast(user_prompt, system_instructions, pdf_path)
-
-            # Save transcript
-            transcript_path = "podcast_transcript.txt"
-            with open(transcript_path, "w", encoding="utf-8") as transcript_file:
-                transcript_file.write(results["transcript"])
-            st.success(f"Transcript saved to {transcript_path}")
-
-            # Save audio as mp3
-            audio_path = "podcast_audio.mp3"
-            with open(audio_path, "wb") as audio_file:
-                audio_file.write(results["audio"])
-            st.audio(audio_path, format="audio/mp3")
-            st.success(f"Audio saved to {audio_path}")
+            # Generate podcast with progress updates
+            progress_placeholder.info("Generating dialogue from PDF content...")
+            try:
+                results = generate_podcast(user_prompt, system_instructions, pdf_path)
+                
+                # Save transcript
+                transcript_path = "podcast_transcript.txt"
+                with open(transcript_path, "w", encoding="utf-8") as transcript_file:
+                    transcript_file.write(results["transcript"])
+                
+                # Check if there were any errors in the transcript
+                if "[ERROR with" in results["transcript"]:
+                    st.warning("⚠️ Some audio segments couldn't be generated due to API limits. Check the transcript for details.")
+                
+                # Show success message
+                st.success(f"Transcript saved to {transcript_path}")
+                
+                # Save and play audio if available
+                if results["audio"]:
+                    audio_path = "podcast_audio.mp3"
+                    with open(audio_path, "wb") as audio_file:
+                        audio_file.write(results["audio"])
+                    st.audio(audio_path, format="audio/mp3")
+                    st.success(f"Audio saved to {audio_path}")
+                else:
+                    st.warning("No audio was generated. Check the logs for more details.")
+                
+                # Clear the progress indicator
+                progress_placeholder.empty()
+                
+            except ValueError as e:
+                if "rate limit" in str(e).lower():
+                    st.error("⚠️ ElevenLabs API rate limit exceeded. Please try again later or reduce the text length.")
+                    st.info("💡 Tip: Consider upgrading your ElevenLabs subscription for higher rate limits.")
+                elif "invalid" in str(e).lower() and "api key" in str(e).lower():
+                    st.error("⚠️ Your ElevenLabs API key appears to be invalid or expired.")
+                    st.info("💡 Check your API key at https://elevenlabs.io/app/account")
+                elif "voice id" in str(e).lower():
+                    st.error("⚠️ Voice ID not found. The configured voice IDs may no longer be valid.")
+                    st.info("💡 Update the voice_id method in the DialogueItem class with valid voice IDs from your ElevenLabs account.")
+                else:
+                    st.error(f"Error with ElevenLabs API: {e}")
+            except Exception as e:
+                st.error(f"Error generating audio: {e}")
+                logging.exception("Exception during podcast generation")
 
         except FileNotFoundError as e:
             st.error(f"Error: {e}")
         except Exception as e:
             st.error(f"An unexpected error occurred: {e}")
+            logging.exception("Unhandled exception")
     else:
         st.warning("Please upload a PDF file to generate the podcast.")
