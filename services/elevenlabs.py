@@ -25,8 +25,8 @@ class DialogueItem:
     @property
     def voice_id(self):
         voice_mapping = {
-            "male-1": "XB0fDUnXU5powFXDhCwa",
-            "female-1": "9BWtsMINqrJLrRacOk9x"
+            "male-1": "UgBBYS2sOqTuMpoF3BR0",
+            "female-1": "KYiVPerWcenyBTIvWbfY"
         }
         
         if self.speaker not in voice_mapping:
@@ -100,7 +100,11 @@ def get_elevenlabs_audio(text: str, voice_id: str, max_retries: int = 3, retry_d
                 continue
                 
             elif response.status_code == 400:
-                error_message = response.json().get("detail", {}).get("message", "Unknown validation error")
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get("detail", {}).get("message", "Unknown validation error")
+                except:
+                    error_message = "Invalid request parameters"
                 logging.error(f"ElevenLabs API validation error: {error_message}")
                 raise ValueError(f"ElevenLabs API validation error: {error_message}")
                 
@@ -136,17 +140,21 @@ def get_elevenlabs_audio(text: str, voice_id: str, max_retries: int = 3, retry_d
     else:
         raise ValueError("Failed to generate audio with ElevenLabs API")
 
-def generate_audio(dialogue_items: List[DialogueItem], max_chunk_size: int = 5) -> dict:
+def generate_audio(dialogue_items: List[DialogueItem], max_chunk_size: int = 5, output_filename: str = "podcast.mp3") -> dict:
     """
     Generate audio from dialogue items with better error handling and rate limiting.
     
     Args:
         dialogue_items: List of DialogueItem objects to convert to audio
         max_chunk_size: Maximum number of items to process in parallel to avoid rate limiting
+        output_filename: Name of the output audio file
         
     Returns:
-        Dict with audio bytes and transcript text
+        Dict with audio_path, transcript_path, and other metadata
     """
+    if not dialogue_items:
+        raise ValueError("No dialogue items provided")
+        
     audio = b""
     transcript = ""
     
@@ -154,11 +162,14 @@ def generate_audio(dialogue_items: List[DialogueItem], max_chunk_size: int = 5) 
     if not check_api_key():
         raise ValueError("Cannot generate audio: ElevenLabs API key is not set")
         
+    logging.info(f"Starting audio generation for {len(dialogue_items)} dialogue items")
+    
     # Process dialogues in smaller chunks to avoid rate limits
+    total_processed = 0
     for i in range(0, len(dialogue_items), max_chunk_size):
         chunk = dialogue_items[i:i+max_chunk_size]
         
-        with cf.ThreadPoolExecutor() as executor:
+        with cf.ThreadPoolExecutor(max_workers=2) as executor:  # Limit concurrent requests
             futures = []
             for line in chunk:
                 transcript_line = f"{line.speaker}: {line.text}"
@@ -167,22 +178,51 @@ def generate_audio(dialogue_items: List[DialogueItem], max_chunk_size: int = 5) 
 
             for future, transcript_line in futures:
                 try:
-                    audio_chunk = future.result()
+                    audio_chunk = future.result(timeout=30)  # Add timeout
                     audio += audio_chunk
-                    transcript += transcript_line + "\n"
+                    transcript += transcript_line + "\n\n"
+                    total_processed += 1
+                    logging.info(f"Generated audio for dialogue {total_processed}/{len(dialogue_items)}")
                     # Small delay between chunks to avoid hitting rate limits
-                    time.sleep(0.2)
+                    time.sleep(0.3)
                 except Exception as e:
                     logging.error(f"Error generating audio for line: {transcript_line}\nError: {str(e)}")
                     # Add error note to transcript but continue processing
-                    transcript += f"[ERROR with {transcript_line}]\n"
+                    transcript += f"[ERROR generating audio for: {transcript_line}]\n\n"
         
         # Add delay between chunks to avoid rate limits
         if i + max_chunk_size < len(dialogue_items):
             logging.info(f"Processed {i + len(chunk)}/{len(dialogue_items)} dialogue items. Pausing to avoid rate limits...")
             time.sleep(2)
 
+    # Save audio to file
+    if audio:
+        try:
+            with open(output_filename, "wb") as f:
+                f.write(audio)
+            logging.info(f"Audio saved to {output_filename}")
+            audio_path = output_filename
+        except Exception as e:
+            logging.error(f"Failed to save audio file: {e}")
+            raise ValueError(f"Failed to save audio file: {e}")
+    else:
+        raise ValueError("No audio was generated")
+    
+    # Save transcript to file
+    transcript_filename = "podcast_transcript.txt"
+    try:
+        with open(transcript_filename, "w", encoding="utf-8") as f:
+            f.write(transcript)
+        logging.info(f"Transcript saved to {transcript_filename}")
+    except Exception as e:
+        logging.error(f"Failed to save transcript file: {e}")
+        transcript_filename = None
+
     return {
-        "audio": audio,
-        "transcript": transcript
+        "audio_path": audio_path,
+        "transcript_path": transcript_filename,
+        "total_items": len(dialogue_items),
+        "processed_items": total_processed,
+        "audio_duration_estimate": f"{len(dialogue_items) * 5}s",  # Rough estimate
+        "file_size": f"{len(audio) / 1024 / 1024:.2f} MB"
     }
